@@ -32,8 +32,8 @@ RISK_FREE_RATE = 0.035
 BUNDLE_DIR = Path("data") / "wrds_bundle"
 BUNDLE_SCHEMA_VERSION = "v2"
 CRSP_PROXY_TICKER_MAPPING: dict[str, list[str]] = {
-    "VT (Proxy for VWCE)": ["VT"],
-    "QQQ (Proxy for SXRV)": ["QQQ"],
+    "VT (Proxy for VWCE - Spliced with SPY pre-2008)": ["VT", "SPY"],
+    "QQQ (Proxy for SXRV)": ["QQQ", "QQQQ"],
     "PRF (Proxy for JPGL)": ["PRF"],
     "IJS (Proxy for ZPRV)": ["IJS"],
     "BRK.B": ["BRK.B"],
@@ -413,13 +413,13 @@ def render() -> None:
     """Render Module 4 WRDS offline bundle and optimizer UI."""
     st.subheader("Module 4: Alpha Sandbox (WRDS Offline Bundle)")
     st.caption(
-        "WRDS-only runtime: CRSP proxies (VT/QQQ/PRF/IJS/BRK) + synthetic ZPRX from Compustat Europe."
+        "WRDS-only runtime: CRSP proxies (VT+SPY splice/QQQ/PRF/IJS/BRK.B) + synthetic ZPRX from Compustat Europe."
     )
     st.caption("Synthetic ZPRX uses EUR-normalized Compustat Global data with May/November rebalancing.")
 
     c1, c2, c3 = st.columns(3)
     username = c1.text_input("WRDS Username", value=DEFAULT_WRDS_USERNAME)
-    years = c2.slider("History (Years)", min_value=5, max_value=20, value=15, step=1)
+    years = c2.slider("History (Years)", min_value=5, max_value=20, value=20, step=1)
     row_limit = c3.slider("WRDS Row Limit", min_value=50_000, max_value=500_000, value=200_000, step=10_000)
 
     c4, c5, c6 = st.columns(3)

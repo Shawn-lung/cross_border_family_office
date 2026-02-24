@@ -610,34 +610,44 @@ def build_named_returns_from_crsp(
 
     out: dict[str, pd.Series] = {}
     for asset, preferred_tickers in mapping.items():
-        selected: pd.DataFrame | None = None
+        stitched: pd.Series | None = None
         for t in preferred_tickers:
             subset = base[base[ticker_col] == t.upper()]
-            if not subset.empty:
-                selected = subset
-                break
+            if subset.empty:
+                continue
 
-        if selected is None:
+            # Force a single return per month to prevent multi-share-class double compounding.
+            sort_cols = [date_col]
+            if "permno" in subset.columns:
+                sort_cols.append("permno")
+            subset = subset.sort_values(sort_cols).drop_duplicates(subset=[date_col], keep="last")
+
+            monthly_index = subset[date_col].dt.to_period("M")
+            ticker_series = (1.0 + subset[return_col]).groupby(monthly_index).prod() - 1.0
+            ticker_series.index = ticker_series.index.to_timestamp("M")
+            ticker_series = ticker_series.sort_index()
+            ticker_series = ticker_series[(ticker_series > -0.95) & (ticker_series < 5.0)]
+            if ticker_series.empty:
+                continue
+
+            # Preferred ticker order controls splice priority (e.g., VT first, then SPY fallback).
+            if stitched is None:
+                stitched = ticker_series
+            else:
+                stitched = stitched.combine_first(ticker_series)
+
+        if stitched is None:
             raise ValueError(
                 f"No rows found for asset {asset} with tickers {preferred_tickers}."
             )
 
-        # Force a single return per month to prevent multi-share-class double compounding.
-        sort_cols = [date_col]
-        if "permno" in selected.columns:
-            sort_cols.append("permno")
-        selected = selected.sort_values(sort_cols).drop_duplicates(subset=[date_col], keep="last")
-
-        monthly_index = selected[date_col].dt.to_period("M")
-        series = (1.0 + selected[return_col]).groupby(monthly_index).prod() - 1.0
-        series.index = series.index.to_timestamp("M")
-        series = series.sort_index()
-        series = series[(series > -0.95) & (series < 5.0)]
-        if series.empty or any(not math.isfinite(v) for v in series.values):
+        stitched = stitched.sort_index()
+        if stitched.empty or any(not math.isfinite(v) for v in stitched.values):
             raise ValueError(f"Series for asset {asset} is empty or invalid.")
-        series.name = asset
-        out[asset] = series
+        stitched.name = asset
+        out[asset] = stitched
 
     frame = pd.concat(out, axis=1).sort_index()
     frame.columns = [str(c) for c in frame.columns]
+    frame = frame.dropna(how="any")
     return frame

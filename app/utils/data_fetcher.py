@@ -22,12 +22,11 @@ WRDS_CACHE_DIR = Path("data") / "wrds_cache"
 DEFAULT_CRSP_PROXY_TICKERS: tuple[str, ...] = (
     "VT",
     "QQQ",
+    "QQQQ",
     "PRF",
-    "BRK",
-    "BRK.B",
-    "BRK-B",
-    "BRKB",
     "IJS",
+    "SPY",
+    "BRK.B",
 )
 DEFAULT_EU_FIC_CODES: tuple[str, ...] = (
     "AUT",
@@ -334,7 +333,7 @@ def build_crsp_proxy_query(
     tickers: Iterable[str] = DEFAULT_CRSP_PROXY_TICKERS,
     brkb_permno: int = 83443,
 ) -> str:
-    """Build CRSP monthly proxy query with explicit BRK.B PERMNO selection."""
+    """Build CRSP monthly proxy query with BRK.B PERMNO and VT/SPY splice support."""
     if years < 1:
         raise ValueError("years must be >= 1.")
     if row_limit < 1:

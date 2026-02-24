@@ -13,7 +13,7 @@ def test_build_crsp_proxy_query_includes_required_proxy_tickers():
 
     assert "FROM crsp.msf" in sql
     assert "JOIN crsp.msenames" in sql
-    for ticker in ["'VT'", "'QQQ'", "'PRF'", "'IJS'"]:
+    for ticker in ["'VT'", "'QQQ'", "'QQQQ'", "'PRF'", "'IJS'", "'SPY'"]:
         assert ticker in sql
     assert "OR m.permno = 83443" in sql
     assert "WHEN m.permno = 83443 THEN 'BRK.B'" in sql

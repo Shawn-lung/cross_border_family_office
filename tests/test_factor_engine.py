@@ -205,7 +205,7 @@ def test_build_named_returns_from_crsp_uses_mapping_priority():
         }
     )
     mapping = {
-        "VT (Proxy for VWCE)": ["VT"],
+        "VT (Proxy for VWCE - Spliced with SPY pre-2008)": ["VT"],
         "PRF (Proxy for JPGL)": ["PRF"],
         "IJS (Proxy for ZPRV)": ["IJS"],
     }
@@ -213,7 +213,9 @@ def test_build_named_returns_from_crsp_uses_mapping_priority():
 
     assert list(out.columns) == list(mapping.keys())
     assert len(out) == 3
-    assert out.loc[pd.Timestamp("2024-02-29"), "VT (Proxy for VWCE)"] == pytest.approx(0.02)
+    assert out.loc[
+        pd.Timestamp("2024-02-29"), "VT (Proxy for VWCE - Spliced with SPY pre-2008)"
+    ] == pytest.approx(0.02)
     assert out.loc[pd.Timestamp("2024-03-31"), "IJS (Proxy for ZPRV)"] == pytest.approx(0.004)
 
 
@@ -233,3 +235,50 @@ def test_build_named_returns_from_crsp_deduplicates_same_month_share_classes():
     # Keep last row per date after sorting (permno 83443 on 2024-01-31), not compounded 1.1*1.2-1.
     assert out.loc[pd.Timestamp("2024-01-31"), "BRK.B"] == pytest.approx(0.20)
     assert out.loc[pd.Timestamp("2024-02-29"), "BRK.B"] == pytest.approx(0.05)
+
+
+def test_build_named_returns_from_crsp_splices_vt_with_spy_pre_launch():
+    """VT sleeve should be backfilled with SPY when VT is unavailable."""
+    crsp = pd.DataFrame(
+        {
+            "date": [
+                "2007-12-31",
+                "2008-01-31",
+                "2008-02-29",
+                "2008-01-31",
+                "2008-02-29",
+            ],
+            "ticker": ["SPY", "SPY", "SPY", "VT", "VT"],
+            "permno": [84398, 84398, 84398, 12345, 12345],
+            "ret": [0.01, -0.02, 0.03, 0.04, 0.05],
+        }
+    )
+    mapping = {"VT (Proxy for VWCE - Spliced with SPY pre-2008)": ["VT", "SPY"]}
+    out = build_named_returns_from_crsp(crsp, mapping=mapping)
+
+    col = "VT (Proxy for VWCE - Spliced with SPY pre-2008)"
+    assert list(out.columns) == [col]
+    assert pd.Timestamp("2007-12-31") in out.index
+    assert out.loc[pd.Timestamp("2007-12-31"), col] == pytest.approx(0.01)
+    # VT takes precedence where available.
+    assert out.loc[pd.Timestamp("2008-01-31"), col] == pytest.approx(0.04)
+
+
+def test_build_named_returns_from_crsp_qqq_falls_back_to_qqqq():
+    """QQQ sleeve should use QQQQ history before QQQ rows exist."""
+    crsp = pd.DataFrame(
+        {
+            "date": ["2010-12-31", "2011-01-31", "2011-02-28", "2011-02-28"],
+            "ticker": ["QQQQ", "QQQQ", "QQQQ", "QQQ"],
+            "permno": [86755, 86755, 86755, 86755],
+            "ret": [0.01, 0.02, 0.03, 0.04],
+        }
+    )
+    mapping = {"QQQ (Proxy for SXRV)": ["QQQ", "QQQQ"]}
+    out = build_named_returns_from_crsp(crsp, mapping=mapping)
+
+    col = "QQQ (Proxy for SXRV)"
+    assert out.loc[pd.Timestamp("2010-12-31"), col] == pytest.approx(0.01)
+    assert out.loc[pd.Timestamp("2011-01-31"), col] == pytest.approx(0.02)
+    # Preferred ticker QQQ should win once present.
+    assert out.loc[pd.Timestamp("2011-02-28"), col] == pytest.approx(0.04)
