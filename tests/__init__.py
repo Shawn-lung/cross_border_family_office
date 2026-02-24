@@ -1,0 +1,1 @@
+"""Test suite package for validating financial logic and simulation correctness."""
