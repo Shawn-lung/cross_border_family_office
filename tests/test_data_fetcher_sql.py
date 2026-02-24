@@ -8,13 +8,15 @@ from app.utils.data_fetcher import (
 
 
 def test_build_crsp_proxy_query_includes_required_proxy_tickers():
-    """CRSP proxy SQL should include VT/QQQ/PRF/BRK/IJS universe."""
+    """CRSP proxy SQL should include non-BRK tickers plus explicit BRK.B PERMNO logic."""
     sql = build_crsp_proxy_query(years=15, row_limit=200_000)
 
     assert "FROM crsp.msf" in sql
     assert "JOIN crsp.msenames" in sql
-    for ticker in ["'VT'", "'QQQ'", "'PRF'", "'BRK'", "'IJS'"]:
+    for ticker in ["'VT'", "'QQQ'", "'PRF'", "'IJS'"]:
         assert ticker in sql
+    assert "OR m.permno = 83443" in sql
+    assert "WHEN m.permno = 83443 THEN 'BRK.B'" in sql
 
 
 def test_build_compustat_eu_pricing_query_uses_adjusted_fields_and_fx():

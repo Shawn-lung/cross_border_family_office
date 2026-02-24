@@ -332,17 +332,30 @@ def build_crsp_proxy_query(
     row_limit: int,
     *,
     tickers: Iterable[str] = DEFAULT_CRSP_PROXY_TICKERS,
+    brkb_permno: int = 83443,
 ) -> str:
-    """Build CRSP monthly proxy query for VT/QQQ/PRF/BRK/IJS sleeves."""
+    """Build CRSP monthly proxy query with explicit BRK.B PERMNO selection."""
     if years < 1:
         raise ValueError("years must be >= 1.")
     if row_limit < 1:
         raise ValueError("row_limit must be >= 1.")
+    if brkb_permno <= 0:
+        raise ValueError("brkb_permno must be positive.")
 
-    ticker_sql = _sql_list_literal(tickers)
+    cleaned = [str(t).strip().upper() for t in tickers if str(t).strip()]
+    brk_ticker_aliases = {"BRK", "BRK.B", "BRK-B", "BRKB"}
+    non_brk_tickers = sorted({t for t in cleaned if t not in brk_ticker_aliases})
+    ticker_predicate = "FALSE"
+    if non_brk_tickers:
+        ticker_sql = _sql_list_literal(non_brk_tickers)
+        ticker_predicate = f"UPPER(n.ticker) IN ({ticker_sql})"
+
     return f"""
 SELECT m.date,
-       UPPER(n.ticker) AS ticker,
+       CASE
+           WHEN m.permno = {int(brkb_permno)} THEN 'BRK.B'
+           ELSE UPPER(n.ticker)
+       END AS ticker,
        m.permno,
        m.ret
 FROM crsp.msf AS m
@@ -350,7 +363,7 @@ JOIN crsp.msenames AS n
   ON m.permno = n.permno
  AND m.date BETWEEN n.namedt AND COALESCE(n.nameendt, DATE '9999-12-31')
 WHERE m.date >= CURRENT_DATE - INTERVAL '{years + 1} years'
-  AND UPPER(n.ticker) IN ({ticker_sql})
+  AND ({ticker_predicate} OR m.permno = {int(brkb_permno)})
   AND m.ret IS NOT NULL
 ORDER BY m.date, n.ticker, m.permno
 LIMIT {int(row_limit)};

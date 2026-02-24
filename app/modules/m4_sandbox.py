@@ -36,7 +36,7 @@ CRSP_PROXY_TICKER_MAPPING: dict[str, list[str]] = {
     "QQQ (Proxy for SXRV)": ["QQQ"],
     "PRF (Proxy for JPGL)": ["PRF"],
     "IJS (Proxy for ZPRV)": ["IJS"],
-    "BRK.B": ["BRK.B", "BRK-B", "BRKB", "BRK"],
+    "BRK.B": ["BRK.B"],
 }
 SYNTHETIC_ZPRX_LABEL = "Synthetic ZPRX (Europe SCV - Compustat)"
 

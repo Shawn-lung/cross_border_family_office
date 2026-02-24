@@ -622,6 +622,12 @@ def build_named_returns_from_crsp(
                 f"No rows found for asset {asset} with tickers {preferred_tickers}."
             )
 
+        # Force a single return per month to prevent multi-share-class double compounding.
+        sort_cols = [date_col]
+        if "permno" in selected.columns:
+            sort_cols.append("permno")
+        selected = selected.sort_values(sort_cols).drop_duplicates(subset=[date_col], keep="last")
+
         monthly_index = selected[date_col].dt.to_period("M")
         series = (1.0 + selected[return_col]).groupby(monthly_index).prod() - 1.0
         series.index = series.index.to_timestamp("M")

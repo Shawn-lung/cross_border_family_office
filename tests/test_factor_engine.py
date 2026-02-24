@@ -215,3 +215,21 @@ def test_build_named_returns_from_crsp_uses_mapping_priority():
     assert len(out) == 3
     assert out.loc[pd.Timestamp("2024-02-29"), "VT (Proxy for VWCE)"] == pytest.approx(0.02)
     assert out.loc[pd.Timestamp("2024-03-31"), "IJS (Proxy for ZPRV)"] == pytest.approx(0.004)
+
+
+def test_build_named_returns_from_crsp_deduplicates_same_month_share_classes():
+    """Duplicate same-date rows must not be compounded together."""
+    crsp = pd.DataFrame(
+        {
+            "date": ["2024-01-31", "2024-01-31", "2024-02-29"],
+            "ticker": ["BRK.B", "BRK.B", "BRK.B"],
+            "permno": [14541, 83443, 83443],
+            "ret": [0.10, 0.20, 0.05],
+        }
+    )
+    mapping = {"BRK.B": ["BRK.B"]}
+    out = build_named_returns_from_crsp(crsp, mapping=mapping)
+
+    # Keep last row per date after sorting (permno 83443 on 2024-01-31), not compounded 1.1*1.2-1.
+    assert out.loc[pd.Timestamp("2024-01-31"), "BRK.B"] == pytest.approx(0.20)
+    assert out.loc[pd.Timestamp("2024-02-29"), "BRK.B"] == pytest.approx(0.05)
