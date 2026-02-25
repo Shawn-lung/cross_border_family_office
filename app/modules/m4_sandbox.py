@@ -30,7 +30,11 @@ from app.utils.factor_engine import (
 
 RISK_FREE_RATE = 0.035
 BUNDLE_DIR = Path("data") / "wrds_bundle"
-BUNDLE_SCHEMA_VERSION = "v2"
+BUNDLE_SCHEMA_VERSION = "v3"
+RET_FLOOR = -0.95
+RET_CEILING = 1.0
+DEFAULT_MIN_ME_FLOOR_EUR = 250_000_000.0
+DEFAULT_MIN_PRICE_FLOOR = 1.0
 CRSP_PROXY_TICKER_MAPPING: dict[str, list[str]] = {
     "VT (Proxy for VWCE - Spliced with SPY pre-2008)": ["VT", "SPY"],
     "QQQ (Proxy for SXRV)": ["QQQ", "QQQQ"],
@@ -138,11 +142,11 @@ def _prepare_pricing_df(raw_pricing: pd.DataFrame) -> pd.DataFrame:
     pricing["ret_from_trt1m"] = pricing["trt1m"] / 100.0
     pricing["ret_from_price"] = pricing.groupby("gvkey")["price"].pct_change()
     pricing["ret"] = pricing["ret_from_trt1m"].where(
-        pricing["ret_from_trt1m"].between(-0.95, 5.0), pricing["ret_from_price"]
+        pricing["ret_from_trt1m"].between(RET_FLOOR, RET_CEILING), pricing["ret_from_price"]
     )
     pricing = pricing.dropna(subset=["ret"])
     pricing = pricing[np.isfinite(pricing["ret"])]
-    pricing = pricing[(pricing["ret"] > -0.95) & (pricing["ret"] < 5.0)]
+    pricing = pricing[(pricing["ret"] > RET_FLOOR) & (pricing["ret"] < RET_CEILING)]
     pricing = pricing.drop(columns=["month"], errors="ignore")
     return pricing
 
@@ -252,6 +256,8 @@ def _build_wrds_return_bundle(
         cash_earnings_col="cash_earnings",
         return_col="ret",
         rebalance_months=(5, 11),
+        min_me_floor=DEFAULT_MIN_ME_FLOOR_EUR,
+        min_price_floor=DEFAULT_MIN_PRICE_FLOOR,
         output_name=SYNTHETIC_ZPRX_LABEL,
     )
     proxies = build_named_returns_from_crsp(
@@ -387,16 +393,23 @@ def _render_portfolio_optimizer(returns_df: pd.DataFrame) -> None:
     normalized = normalize_weights(pd.Series(raw_weights, dtype=float))
     metrics = calculate_portfolio_metrics(mu, sigma, normalized, risk_free_rate=RISK_FREE_RATE)
 
-    c1, c2, c3 = st.columns(3)
+    portfolio_monthly = returns_df.reindex(columns=normalized.index).mul(normalized, axis=1).sum(axis=1)
+    portfolio_cagr = ((1.0 + portfolio_monthly).prod() ** (12.0 / len(portfolio_monthly))) - 1.0
+
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Expected Return", f"{metrics['expected_return'] * 100:.2f}%")
-    c2.metric("Volatility (Risk)", f"{metrics['volatility'] * 100:.2f}%")
-    c3.metric("Sharpe Ratio", f"{metrics['sharpe_ratio']:.3f}")
+    c2.metric("Portfolio CAGR", f"{portfolio_cagr * 100:.2f}%")
+    c3.metric("Volatility (Risk)", f"{metrics['volatility'] * 100:.2f}%")
+    c4.metric("Sharpe Ratio", f"{metrics['sharpe_ratio']:.3f}")
+
+    asset_cagr = ((1.0 + returns_df).prod() ** (12.0 / len(returns_df))) - 1.0
 
     weights_view = pd.DataFrame(
         {
             "Asset": normalized.index,
             "Normalized Weight (%)": normalized.values * 100.0,
             "Annualized Mu (%)": mu.loc[normalized.index].values * 100.0,
+            "Asset CAGR (%)": asset_cagr.loc[normalized.index].values * 100.0,
         }
     )
     st.dataframe(weights_view, use_container_width=True, hide_index=True)
@@ -415,7 +428,10 @@ def render() -> None:
     st.caption(
         "WRDS-only runtime: CRSP proxies (VT+SPY splice/QQQ/PRF/IJS/BRK.B) + synthetic ZPRX from Compustat Europe."
     )
-    st.caption("Synthetic ZPRX uses EUR-normalized Compustat Global data with May/November rebalancing.")
+    st.caption(
+        "Synthetic ZPRX uses EUR-normalized Compustat Global data, May/November rebalancing,"
+        " 250M EUR min market-cap, and 1.0 EUR min price screens."
+    )
 
     c1, c2, c3 = st.columns(3)
     username = c1.text_input("WRDS Username", value=DEFAULT_WRDS_USERNAME)

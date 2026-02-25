@@ -79,12 +79,20 @@ def compute_msci_fundamental_weights(
     cash_earnings_col: str = "cash_earnings",
     book_value_col: str = "book_value",
     weight_col: str = "weight",
+    max_weight_cap: float | None = 0.05,
 ) -> pd.DataFrame:
-    """Compute MSCI-style fundamental weights by cross-section and period."""
+    """Compute MSCI-style fundamental weights by cross-section and period.
+
+    A strict max-weight cap can be applied after initial normalization.
+    If the cap is infeasible for a cross-section (e.g., 2 names with 5% cap),
+    normalized uncapped weights are retained for that period.
+    """
     required = {date_col, sales_col, earnings_col, cash_earnings_col, book_value_col}
     if not required.issubset(small_value_df.columns):
         missing = required - set(small_value_df.columns)
         raise KeyError(f"Missing columns for fundamental weights: {sorted(missing)}")
+    if max_weight_cap is not None and max_weight_cap <= 0:
+        raise ValueError("max_weight_cap must be positive when provided.")
 
     df = small_value_df.copy()
     df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
@@ -106,7 +114,79 @@ def compute_msci_fundamental_weights(
     group_weight_sum = df.groupby(date_col)[weight_col].transform("sum")
     group_size = df.groupby(date_col)[weight_col].transform("size")
     df[weight_col] = np.where(group_weight_sum > 0, df[weight_col] / group_weight_sum, 1.0 / group_size)
+
+    # Apply strict concentration control by period.
+    if max_weight_cap is not None and max_weight_cap < 1.0:
+        df[weight_col] = (
+            df.groupby(date_col, group_keys=False)[weight_col]
+            .apply(
+                lambda w: _apply_strict_weight_cap(
+                    pd.to_numeric(w, errors="coerce").fillna(0.0),
+                    cap=max_weight_cap,
+                )
+            )
+            .astype(float)
+        )
     return df
+
+
+def _apply_strict_weight_cap(weights: pd.Series, *, cap: float) -> pd.Series:
+    """Apply iterative cap redistribution while preserving sum-to-one."""
+    if cap <= 0:
+        raise ValueError("cap must be positive.")
+
+    w = pd.to_numeric(weights, errors="coerce").fillna(0.0).clip(lower=0.0).astype(float)
+    n = len(w)
+    if n == 0:
+        return w
+
+    total = float(w.sum())
+    if total <= 0:
+        return pd.Series(np.repeat(1.0 / n, n), index=w.index, dtype=float)
+    w = w / total
+
+    # If cap is mathematically infeasible for this cross-section, keep normalized weights.
+    # Example: 2 names with a 5% cap cannot sum to 100%.
+    if n * cap < 1.0 - 1e-12:
+        return w
+
+    remaining = w.copy()
+    final = pd.Series(0.0, index=w.index, dtype=float)
+    remaining_total = 1.0
+    eps = 1e-12
+
+    while not remaining.empty and remaining_total > eps:
+        rem_sum = float(remaining.sum())
+        if rem_sum <= eps:
+            final.loc[remaining.index] += remaining_total / len(remaining)
+            remaining_total = 0.0
+            break
+
+        scaled = remaining / rem_sum * remaining_total
+        over = scaled > cap + eps
+        if not bool(over.any()):
+            final.loc[remaining.index] = scaled
+            remaining = remaining.iloc[0:0]
+            remaining_total = 0.0
+            break
+
+        capped_idx = scaled.index[over]
+        final.loc[capped_idx] = cap
+        remaining_total -= cap * len(capped_idx)
+        remaining = remaining.drop(index=capped_idx)
+
+    if remaining_total > eps:
+        remaining_idx = final[final < cap - eps].index
+        if len(remaining_idx) > 0:
+            final.loc[remaining_idx] += remaining_total / len(remaining_idx)
+        else:
+            final = final / float(final.sum())
+
+    final = final.clip(lower=0.0)
+    final_sum = float(final.sum())
+    if final_sum <= 0:
+        return pd.Series(np.repeat(1.0 / n, n), index=w.index, dtype=float)
+    return final / final_sum
 
 
 def compute_synthetic_portfolio_returns(
@@ -146,9 +226,19 @@ def compute_synthetic_portfolio_returns_with_rebalance_schedule(
     rebalance_date_col: str = "rebalance_date",
     return_col: str = "ret",
     weight_col: str = "weight",
+    annual_friction_bps: float = 80.0,
+    missing_return_penalty: float = -0.30,
     output_name: str = "Synthetic_ZPRX",
 ) -> pd.Series:
-    """Calculate synthetic returns using carry-forward weights from rebalance dates."""
+    """Calculate synthetic returns with lagged weights and survivorship-bias control.
+
+    Rules:
+    - Rebalance weights are applied with a one-period lag.
+    - If an active name's return is missing for the first time in a rebalance cycle,
+      apply `missing_return_penalty` (default -30%).
+    - After first missing observation, name enters `dead_stocks` and contributes 0%
+      for the remainder of that rebalance cycle (cash parking).
+    """
     required_returns = {id_col, date_col, return_col}
     required_weights = {id_col, rebalance_date_col, weight_col}
     if not required_returns.issubset(returns_df.columns):
@@ -157,6 +247,10 @@ def compute_synthetic_portfolio_returns_with_rebalance_schedule(
     if not required_weights.issubset(rebalance_weights_df.columns):
         missing = required_weights - set(rebalance_weights_df.columns)
         raise KeyError(f"Missing columns in rebalance_weights_df: {sorted(missing)}")
+    if annual_friction_bps < 0:
+        raise ValueError("annual_friction_bps must be non-negative.")
+    if missing_return_penalty < -1.0 or missing_return_penalty > 0.0:
+        raise ValueError("missing_return_penalty must be between -1.0 and 0.0.")
 
     data = returns_df.copy()
     data[date_col] = pd.to_datetime(data[date_col], errors="coerce")
@@ -187,11 +281,19 @@ def compute_synthetic_portfolio_returns_with_rebalance_schedule(
         raise ValueError("No usable rebalance snapshots after cleaning.")
 
     available_rebalances = np.array(sorted(weight_map.keys()), dtype="datetime64[ns]")
+    monthly_friction = (annual_friction_bps / 10000.0) / 12.0
     results: list[tuple[pd.Timestamp, float]] = []
+    last_rebal_idx: int | None = None
+    dead_stocks: set[str] = set()
     for dt, cross in data.groupby(date_col):
-        rebal_idx = np.searchsorted(available_rebalances, np.datetime64(dt), side="right") - 1
+        # Use strictly prior rebalance snapshot to prevent same-month look-ahead bias.
+        rebal_idx = np.searchsorted(available_rebalances, np.datetime64(dt), side="left") - 1
         if rebal_idx < 0:
             continue
+
+        if last_rebal_idx is None or rebal_idx != last_rebal_idx:
+            dead_stocks = set()
+            last_rebal_idx = rebal_idx
 
         active_date = pd.Timestamp(available_rebalances[rebal_idx])
         active_weights = weight_map.get(active_date)
@@ -199,20 +301,27 @@ def compute_synthetic_portfolio_returns_with_rebalance_schedule(
             continue
 
         current_returns = cross.groupby(id_col)[return_col].mean()
-        common = active_weights.index.intersection(current_returns.index)
-        if common.empty:
-            continue
+        aligned_returns: dict[str, float] = {}
+        for asset_id in active_weights.index:
+            asset_key = str(asset_id)
+            if asset_key in dead_stocks:
+                aligned_returns[asset_id] = 0.0
+                continue
 
-        w = active_weights.loc[common]
-        w_sum = float(w.sum())
-        if w_sum <= 0:
-            continue
-        w = w / w_sum
+            observed = current_returns.get(asset_id)
+            if observed is None or not math.isfinite(float(observed)):
+                aligned_returns[asset_id] = float(missing_return_penalty)
+                dead_stocks.add(asset_key)
+            else:
+                aligned_returns[asset_id] = float(observed)
 
-        r = current_returns.loc[common]
-        portfolio_ret = float((w * r).sum())
-        if math.isfinite(portfolio_ret):
-            results.append((pd.Timestamp(dt), portfolio_ret))
+        r = pd.Series(aligned_returns, index=active_weights.index, dtype=float)
+        w = active_weights
+        gross_return = float((w * r).sum())
+        net_return_raw = gross_return - monthly_friction
+        net_return = max(-1.0, net_return_raw)
+        if math.isfinite(net_return):
+            results.append((pd.Timestamp(dt), net_return))
 
     if not results:
         raise ValueError("Synthetic return schedule produced no monthly observations.")
@@ -235,12 +344,24 @@ def build_synthetic_factor_return_series(
     cash_earnings_col: str = "cash_earnings",
     return_col: str = "ret",
     rebalance_months: tuple[int, ...] = (5, 11),
+    max_weight_cap: float | None = 0.05,
+    annual_friction_bps: float = 80.0,
+    missing_return_penalty: float = -0.30,
+    min_me_floor: float = 250_000_000.0,
+    min_price_floor: float = 1.0,
     output_name: str = "Synthetic_ZPRX",
 ) -> pd.Series:
-    """Run end-to-end synthetic factor pipeline with semi-annual rebalance carry-forward."""
+    """Run end-to-end synthetic factor pipeline with semi-annual rebalance carry-forward.
+
+    `min_me_floor` is interpreted in absolute EUR market-cap units.
+    """
     invalid_months = [m for m in rebalance_months if m < 1 or m > 12]
     if invalid_months:
         raise ValueError(f"rebalance_months must be in 1..12, got: {sorted(invalid_months)}")
+    if min_me_floor < 0:
+        raise ValueError("min_me_floor must be non-negative.")
+    if min_price_floor < 0:
+        raise ValueError("min_price_floor must be non-negative.")
 
     if id_col not in merged_df.columns:
         raise KeyError(f"Missing id column for synthetic build: {id_col}")
@@ -257,6 +378,11 @@ def build_synthetic_factor_return_series(
         raise ValueError("Merged dataset is empty after metric cleanup.")
 
     rebalance_universe = enriched[enriched[date_col].dt.month.isin(rebalance_months)].copy()
+    # Apply investability screens at rebalance snapshots only.
+    rebalance_universe = rebalance_universe[
+        (pd.to_numeric(rebalance_universe["me"], errors="coerce") >= min_me_floor)
+        & (pd.to_numeric(rebalance_universe[price_col], errors="coerce") >= min_price_floor)
+    ]
     if rebalance_universe.empty:
         raise ValueError("No rows found for configured rebalance months.")
 
@@ -276,6 +402,7 @@ def build_synthetic_factor_return_series(
         earnings_col=earnings_col,
         cash_earnings_col=cash_earnings_col,
         book_value_col=book_value_col,
+        max_weight_cap=max_weight_cap,
     )
     weighted_rebalance = weighted_rebalance[[id_col, date_col, "weight"]].rename(
         columns={date_col: "rebalance_date"}
@@ -289,6 +416,8 @@ def build_synthetic_factor_return_series(
         rebalance_date_col="rebalance_date",
         return_col=return_col,
         weight_col="weight",
+        annual_friction_bps=annual_friction_bps,
+        missing_return_penalty=missing_return_penalty,
         output_name=output_name,
     )
 

@@ -111,7 +111,7 @@ def _price_to_twd(price: float, currency: str, fx_rates: ForexRates) -> float:
         return price * fx_rates.usd_twd
     if ccy == "EUR":
         return price * fx_rates.eur_twd
-    if ccy in {"GBP", "GBX", "GBP", "GBP."}:
+    if ccy in {"GBP", "GBX"}:
         gbp_twd = _fetch_direct_fx_to_twd("GBP")
         if ccy == "GBX":
             return (price / 100.0) * gbp_twd
